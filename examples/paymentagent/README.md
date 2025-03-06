@@ -11,7 +11,7 @@ A DeFi payment agent built using CDP AgentKit that operates over the XMTP messag
 
 ## Prerequisites
 
-- Node.js (v16+)
+- Node.js (v20+)
 - [OpenAI](https://platform.openai.com/) API key
 - [Coinbase Developer Platform](https://portal.cdp.coinbase.com) (CDP) API credentials
 
