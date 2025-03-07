@@ -112,34 +112,37 @@ const WALLET_KEY_PREFIX = "wallet_data:";
 const LOCAL_STORAGE_DIR = "./wallet_data";
 let redisClient: any = null;
 
-// Set up Redis client if URL is provided
-if (process.env.REDIS_URL) {
-  redisClient = createClient({
-    url: process.env.REDIS_URL,
-  });
+/**
+ * Initialize Redis client and handle fallback to local storage
+ */
+async function initializeStorage() {
+  if (process.env.REDIS_URL) {
+    try {
+      redisClient = createClient({
+        url: process.env.REDIS_URL,
+      });
 
-  // Connect to Redis
-  redisClient
-    .connect()
-    .then(() => {
+      await redisClient.connect();
       console.log("Connected to Redis");
-    })
-    .catch((err: any) => {
-      console.error("Failed to connect to Redis:", err);
+    } catch (error) {
+      console.error("Failed to connect to Redis:", error);
       console.log("Falling back to local file storage");
       redisClient = null;
+      ensureLocalStorage();
+    }
+  } else {
+    console.log("Using local file storage for wallet data");
+    ensureLocalStorage();
+  }
+}
 
-      // Create local storage directory if it doesn't exist
-      if (!fs.existsSync(LOCAL_STORAGE_DIR)) {
-        fs.mkdirSync(LOCAL_STORAGE_DIR, { recursive: true });
-      }
-    });
-} else {
-  // Create local storage directory if it doesn't exist
+/**
+ * Ensure local storage directory exists
+ */
+function ensureLocalStorage() {
   if (!fs.existsSync(LOCAL_STORAGE_DIR)) {
     fs.mkdirSync(LOCAL_STORAGE_DIR, { recursive: true });
   }
-  console.log("Using local file storage for wallet data");
 }
 
 /**
@@ -300,18 +303,18 @@ async function initializeAgent(
         You are a DeFi Payment Agent that assists users with sending payments to any wallet address using natural language instructions.
 
         When a user asks you to make a payment:
-        1. Always confirm the payment details before proceeding.
-        2. Provide clear information about network fees and transaction status.
-        3. Notify users of successful transactions with relevant details.
+        1. Provide clear information about network fees (if any) and transaction status.
+        2. Notify users of successful transactions with relevant details.
         
         You can only perform payment-related tasks. For other requests, politely explain that you're 
         specialized in processing payments and can't assist with other tasks.
+
+        Your default currency is USDC and the token address is 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913. It's gasless on base-mainnet.
         
         If you encounter an error, provide clear troubleshooting advice and offer to retry the transaction.
         
         Before executing your first action, get the wallet balance to see how much funds you have.
         If you don't have enough funds, ask the user to deposit more funds into your wallet and provide them your wallet address.
-        You're on the base-sepolia testnet, where you can request funds from a faucet if needed.
         
         If there is a 5XX (internal) HTTP error, ask the user to try again later.
         
@@ -384,22 +387,8 @@ async function processMessage(
 async function main(): Promise<void> {
   console.log("Starting Payment Agent...");
 
-  // Connect to Redis if available
-  if (redisClient) {
-    try {
-      await redisClient.connect();
-      console.log("Connected to Redis");
-    } catch (error) {
-      console.error("Failed to connect to Redis:", error);
-      console.log("Falling back to local file storage");
-      redisClient = null;
-
-      // Create local storage directory if it doesn't exist
-      if (!fs.existsSync(LOCAL_STORAGE_DIR)) {
-        fs.mkdirSync(LOCAL_STORAGE_DIR, { recursive: true });
-      }
-    }
-  }
+  // Initialize storage (Redis or local)
+  await initializeStorage();
 
   // Initialize XMTP client
   const { client: xmtpClient, env } = await initializeXmtpClient();
