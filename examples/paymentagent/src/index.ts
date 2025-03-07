@@ -94,13 +94,13 @@ function validateEnvironment(): void {
   // Warn about optional variables
   if (!process.env.NETWORK_ID) {
     console.warn(
-      "Warning: NETWORK_ID not set, defaulting to base-sepolia testnet",
+      "Warning: NETWORK_ID not set, defaulting to base-sepolia testnet"
     );
   }
 
   if (!process.env.REDIS_URL) {
     console.warn(
-      "Warning: REDIS_URL not set, using local file storage for wallet data",
+      "Warning: REDIS_URL not set, using local file storage for wallet data"
     );
   }
 }
@@ -162,7 +162,7 @@ async function initializeXmtpClient() {
   await client.conversations.sync();
 
   console.log(
-    `Agent initialized on ${client.accountAddress}\nSend a message on http://xmtp.chat/dm/${client.accountAddress}?env=${env}`,
+    `Agent initialized on ${client.accountAddress}\nSend a message on http://xmtp.chat/dm/${client.accountAddress}?env=${env}`
   );
 
   return { client, env };
@@ -200,7 +200,7 @@ async function getOrCreateWalletForUser(userId: string) {
     apiKeyName: process.env.CDP_API_KEY_NAME!,
     apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY?.replace(
       /\\n/g,
-      "\n",
+      "\n"
     ),
     cdpWalletData: walletDataStr || undefined,
     networkId: process.env.NETWORK_ID || "base-sepolia",
@@ -248,7 +248,7 @@ type Agent = ReturnType<typeof createReactAgent>;
  * @returns Agent executor and config
  */
 async function initializeAgent(
-  userId: string,
+  userId: string
 ): Promise<{ agent: Agent; config: AgentConfig }> {
   try {
     // Initialize LLM
@@ -270,14 +270,14 @@ async function initializeAgent(
           apiKeyName: process.env.CDP_API_KEY_NAME!,
           apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY?.replace(
             /\\n/g,
-            "\n",
+            "\n"
           ),
         }),
         cdpWalletActionProvider({
           apiKeyName: process.env.CDP_API_KEY_NAME!,
           apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY?.replace(
             /\\n/g,
-            "\n",
+            "\n"
           ),
         }),
       ],
@@ -354,14 +354,14 @@ async function initializeAgent(
 async function processMessage(
   agent: Agent,
   config: AgentConfig,
-  message: string,
+  message: string
 ): Promise<string> {
   let response = "";
 
   try {
     const stream = await agent.stream(
       { messages: [new HumanMessage(message)] },
-      config,
+      config
     );
 
     for await (const chunk of stream) {
@@ -382,108 +382,76 @@ async function processMessage(
 }
 
 async function main(): Promise<void> {
-  try {
-    console.log("Starting Payment Agent...");
+  console.log("Starting Payment Agent...");
 
-    // Connect to Redis if available
-    if (redisClient) {
-      try {
-        await redisClient.connect();
-        console.log("Connected to Redis");
-      } catch (error) {
-        console.error("Failed to connect to Redis:", error);
-        console.log("Falling back to local file storage");
-        redisClient = null;
+  // Connect to Redis if available
+  if (redisClient) {
+    try {
+      await redisClient.connect();
+      console.log("Connected to Redis");
+    } catch (error) {
+      console.error("Failed to connect to Redis:", error);
+      console.log("Falling back to local file storage");
+      redisClient = null;
 
-        // Create local storage directory if it doesn't exist
-        if (!fs.existsSync(LOCAL_STORAGE_DIR)) {
-          fs.mkdirSync(LOCAL_STORAGE_DIR, { recursive: true });
-        }
+      // Create local storage directory if it doesn't exist
+      if (!fs.existsSync(LOCAL_STORAGE_DIR)) {
+        fs.mkdirSync(LOCAL_STORAGE_DIR, { recursive: true });
       }
     }
+  }
 
-    // Initialize XMTP client
-    const { client: xmtpClient, env } = await initializeXmtpClient();
+  // Initialize XMTP client
+  const { client: xmtpClient, env } = await initializeXmtpClient();
 
-    console.log("Waiting for messages...");
-    const stream = xmtpClient.conversations.streamAllMessages();
+  console.log("Waiting for messages...");
+  const stream = xmtpClient.conversations.streamAllMessages();
 
-    // Use a controlled loop instead of while(true)
-    let isRunning = true;
-
-    // Handle graceful shutdown
-    process.on("SIGINT", () => {
-      console.log("Received SIGINT, shutting down gracefully...");
-      isRunning = false;
-    });
-
-    while (isRunning) {
-      try {
-        for await (const message of await stream) {
-          // Ignore messages from the same agent or non-text messages
-          if (
-            message?.senderInboxId.toLowerCase() ===
-              xmtpClient.inboxId.toLowerCase() ||
-            message?.contentType?.typeId !== "text"
-          ) {
-            continue;
-          }
-
-          console.log(
-            `Received message: ${message.content as string} by ${message.senderInboxId}`,
-          );
-
-          // Get the conversation
-          const conversation = xmtpClient.conversations.getConversationById(
-            message.conversationId,
-          );
-
-          if (!conversation) {
-            console.log("Unable to find conversation, skipping");
-            continue;
-          }
-
-          // Use the sender's address as the user ID
-          const userId = message.senderInboxId;
-
-          // Initialize or get the agent for this user
-          const { agent, config } = await initializeAgent(userId);
-
-          // Process the message with the agent
-          const response = await processMessage(
-            agent,
-            config,
-            message.content as string,
-          );
-
-          // Send the response back to the user
-          console.log(`Sending response to ${userId}...`);
-          await conversation.send(response);
-
-          console.log("Waiting for more messages...");
-        }
-      } catch (streamError) {
-        console.error("Stream error, reconnecting:", streamError);
-        // Wait a bit before reconnecting
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-
-        // Check if we should continue running
-        if (!isRunning) break;
-      }
+  for await (const message of await stream) {
+    // Ignore messages from the same agent or non-text messages
+    if (
+      message?.senderInboxId.toLowerCase() ===
+        xmtpClient.inboxId.toLowerCase() ||
+      message?.contentType?.typeId !== "text"
+    ) {
+      continue;
     }
-  } catch (error: unknown) {
-    console.error("Fatal error:", error);
-    process.exit(1);
-  } finally {
-    // Close Redis connection when done
-    if (redisClient) {
-      await redisClient.disconnect();
+
+    console.log(
+      `Received message: ${message.content as string} by ${
+        message.senderInboxId
+      }`
+    );
+
+    // Get the conversation
+    const conversation = await xmtpClient.conversations.getConversationById(
+      message.conversationId
+    );
+
+    if (!conversation) {
+      console.log("Unable to find conversation, skipping");
+      continue;
     }
+
+    // Use the sender's address as the user ID
+    const userId = message.senderInboxId;
+
+    // Initialize or get the agent for this user
+    const { agent, config } = await initializeAgent(userId);
+
+    // Process the message with the agent
+    const response = await processMessage(
+      agent,
+      config,
+      message.content as string
+    );
+
+    // Send the response back to the user
+    console.log(`Sending response to ${userId}...`);
+    await conversation.send(response);
+
+    console.log("Waiting for more messages...");
   }
 }
 
-// Start the agent
-main().catch((error: unknown) => {
-  console.error("Fatal error:", error);
-  process.exit(1);
-});
+main().catch(console.error);
