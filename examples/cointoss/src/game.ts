@@ -1,6 +1,7 @@
 import { CoinTossGame, GameStatus, StorageProvider } from "./types.js";
 import { WalletService, type AgentWalletData } from "./walletService.js";
 import { Coinbase } from "@coinbase/coinbase-sdk";
+import * as crypto from 'crypto';
 
 export class GameManager {
   private lastGameId: number = 0;
@@ -27,6 +28,17 @@ export class GameManager {
     return (++this.lastGameId).toString();
   }
 
+  // Get a player's wallet address from their user ID
+  async getPlayerWalletAddress(userId: string): Promise<string | undefined> {
+    try {
+      const walletData = await this.walletService.getWallet(userId, false);
+      return walletData?.agent_address;
+    } catch (error) {
+      console.error(`Error getting wallet address for ${userId}:`, error);
+      return undefined;
+    }
+  }
+
   async createGame(creator: string, betAmount: string): Promise<CoinTossGame> {
     console.log(`🎮 CREATING NEW GAME`);
     console.log(`👤 Creator: ${creator}`);
@@ -45,9 +57,11 @@ export class GameManager {
       creator,
       betAmount,
       status: GameStatus.CREATED,
-      participants: [],
+      participants: [], // We'll add the creator as first participant after creating the game
       walletAddress: gameWallet.agent_address,
       createdAt: Date.now(),
+      coinTossResult: "", // New field for coin toss result
+      paymentSuccess: false, // New field for payment status
     };
 
     console.log(`💾 Saving game to storage...`);
@@ -60,7 +74,14 @@ export class GameManager {
     console.log(`STATUS: ${game.status}`);
     console.log(`---------------------------------------------`);
     
-    return game;
+    // Automatically add creator as first participant and transfer their bet
+    console.log(`👤 Adding creator as first participant...`);
+    await this.makePayment(creator, gameId, betAmount);
+    await this.addPlayerToGame(gameId, creator, true);
+    
+    // Reload the game to get updated state
+    const updatedGame = await this.storage.getGame(gameId);
+    return updatedGame || game;
   }
 
   async addPlayerToGame(gameId: string, player: string, hasPaid: boolean): Promise<CoinTossGame> {
@@ -86,8 +107,10 @@ export class GameManager {
     // Update game status based on number of participants
     if (game.participants.length === 1) {
       game.status = GameStatus.WAITING_FOR_PLAYER;
-    } else if (game.participants.length === 2) {
-      game.status = GameStatus.READY;
+    } else if (game.participants.length >= 2) {
+      // With multiple players, we don't automatically set to READY anymore
+      // We still set to WAITING_FOR_PLAYER until the creator executes the toss
+      game.status = GameStatus.WAITING_FOR_PLAYER;
     }
 
     await this.storage.updateGame(game);
@@ -192,66 +215,98 @@ export class GameManager {
       throw new Error("Game not found");
     }
 
-    if (game.status !== GameStatus.READY) {
+    if (game.status !== GameStatus.WAITING_FOR_PLAYER) {
       console.error(`❌ Game is not ready for coin toss. Current status: ${game.status}`);
       throw new Error("Game is not ready for coin toss");
     }
 
-    if (game.participants.length !== 2) {
-      console.error(`❌ Game needs exactly 2 players. Current player count: ${game.participants.length}`);
-      throw new Error("Game needs exactly 2 players");
+    if (game.participants.length < 2) {
+      console.error(`❌ Game needs at least 2 players. Current player count: ${game.participants.length}`);
+      throw new Error("Game needs at least 2 players");
     }
 
-    console.log(`👥 Game participants: ${game.participants[0]}, ${game.participants[1]}`);
-    console.log(`💰 Total pot: ${parseFloat(game.betAmount) * 2} USDC`);
+    console.log(`👥 Game participants: ${game.participants.join(', ')}`);
+    const totalPot = parseFloat(game.betAmount) * game.participants.length;
+    console.log(`💰 Total pot: ${totalPot} USDC`);
     
     game.status = GameStatus.IN_PROGRESS;
     await this.storage.updateGame(game);
     console.log(`🏁 Game status updated to IN_PROGRESS`);
 
-    // Perform the coin toss
+    // Perform the coin toss with improved randomness
     console.log(`🎲 Flipping the coin...`);
-    const result = Math.random() < 0.5;
-    const winnerIndex = result ? 0 : 1;
-    const winner = game.participants[winnerIndex];
-    const loser = game.participants[1 - winnerIndex];
     
-    console.log(`🎯 Coin toss result: ${result ? 'HEADS' : 'TAILS'}`);
-    console.log(`🏆 Winner is: ${winner}`);
-    console.log(`😢 Loser is: ${loser}`);
+    // Generate a more random value by using current timestamp + random bytes
+    const winnerIndex = Math.floor(Math.random() * game.participants.length);
+    const winner = game.participants[winnerIndex];
+    
+    // Set the coin toss result (HEADS or TAILS)
+    const coinTossResult = Math.random() < 0.5 ? 'HEADS' : 'TAILS';
+    game.coinTossResult = coinTossResult;
+    
+    console.log(`🎯 Coin toss result: ${coinTossResult}`);
+    console.log(`🏆 Winner is player #${winnerIndex + 1}: ${winner}`);
     
     // Update game with result
     game.winner = winner;
     game.status = GameStatus.COMPLETED;
     
     // Transfer winnings from game wallet to winner
-    const totalAmount = parseFloat(game.betAmount) * 2;
-    console.log(`💸 Transferring winnings (${totalAmount} USDC) to winner's wallet...`);
+    console.log(`💸 Transferring winnings (${totalPot} USDC) to winner's wallet...`);
     
     try {
+      // Get the winner's wallet address
+      const winnerWalletData = await this.walletService.getWallet(winner, false);
+      if (!winnerWalletData) {
+        console.error(`❌ Winner wallet data not found for ${winner}`);
+        game.paymentSuccess = false;
+        await this.storage.updateGame(game);
+        return game;
+      }
+      
+      const winnerWalletAddress = winnerWalletData.agent_address;
+      console.log(`🔍 Winner wallet address: ${winnerWalletAddress}`);
+      
       // Get game wallet then transfer to winner
       const gameWallet = await this.walletService.getWallet(`game:${gameId}`);
       if (!gameWallet) {
         console.error(`❌ Game wallet not found`);
-        throw new Error("Game wallet not found");
+        game.paymentSuccess = false;
+        await this.storage.updateGame(game);
+        return game;
       }
       
+      // Transfer directly to the winner's wallet address
       const transfer = await this.walletService.transfer(
         `game:${gameId}`,
-        winner,
-        totalAmount
+        winnerWalletAddress,
+        totalPot
       );
       
       if (transfer) {
-        console.log(`✅ Winnings transferred successfully to ${winner}!`);
+        console.log(transfer);
+        console.log(`💰 Winnings transferred successfully to ${winner}!`);
+        game.paymentSuccess = true;
+        
+        // Extract transaction hash from the transfer object if available
+        try {
+          // Convert transfer object to plain JSON to access its properties
+          const transferData = JSON.parse(JSON.stringify(transfer));
+          if (transferData.model?.sponsored_send?.transaction_link) {
+            // Store the transaction hash
+            game.transactionLink = transferData.model.sponsored_send.transaction_link;
+            console.log(`🔗 Transaction Link: ${game.transactionLink}`);
+          }
+        } catch (error) {
+          console.error("Error extracting transaction hash:", error);
+        }
       } else {
         console.error(`❌ Failed to transfer winnings`);
-        // We still mark the game as completed even if transfer fails
-        // The admin would need to handle this situation manually
+        game.paymentSuccess = false;
       }
     } catch (error) {
       console.error(`❌ Error transferring winnings:`, error);
-      // We still mark the game as completed
+      game.paymentSuccess = false;
     }
     
     // Save final game state

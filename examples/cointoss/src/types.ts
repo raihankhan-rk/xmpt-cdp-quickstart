@@ -9,6 +9,9 @@ export interface CoinTossGame {
   winner?: string;
   walletAddress: string;
   createdAt: number;
+  coinTossResult?: string;
+  paymentSuccess?: boolean;
+  transactionLink?: string;
 }
 
 export enum GameStatus {
