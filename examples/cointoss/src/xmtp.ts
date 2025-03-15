@@ -10,7 +10,7 @@ import { sepolia } from "viem/chains";
  * @param walletKey - Wallet private key as a hex string
  * @returns A signer object compatible with XMTP
  */
-function createSigner(walletKey: string): Signer {
+export const createSigner = (walletKey: string): Signer => {
   const account = privateKeyToAccount(walletKey as `0x${string}`);
   const wallet = createWalletClient({
     account,
@@ -71,13 +71,33 @@ export async function initializeXmtpClient() {
   const identifier = await signer.getIdentifier();
 
   console.log(
-    `Agent initialized on ${identifier.identifier}\nSend a message on http://xmtp.chat/dm/${identifier.identifier}?env=${env}`
+    `CoinToss Agent initialized on ${identifier.identifier}\nSend a message on http://xmtp.chat/dm/${identifier.identifier}?env=${env}`
   );
 
   return { client, env };
 }
 
-export type MessageHandler = (message: any, conversation: any) => Promise<void>;
+export type MessageHandler = (message: any, conversation: any, userId: string, content: string) => Promise<void>;
+
+/**
+ * Check if the message is tagged for the toss bot
+ * @param content Message content
+ * @returns True if the message is tagged for toss bot
+ */
+function isMessageForTossBot(content: string): boolean {
+  const lowerContent = content.toLowerCase().trim();
+  return lowerContent.startsWith('@toss');
+}
+
+/**
+ * Strip tag from message content
+ * @param content Message content
+ * @returns Message content without tag
+ */
+function stripTag(content: string): string {
+  // Remove @toss from the beginning and trim
+  return content.replace(/^@toss\s*/i, '').trim();
+}
 
 /**
  * Start listening for messages and handle them with the provided handler
@@ -95,9 +115,16 @@ export async function startMessageListener(client: Client, handleMessage: Messag
       continue;
     }
 
-    console.log(
-      `Received message: ${message.content as string} by ${message.senderInboxId}`
-    );
+    const content = message.content as string;
+    
+    // Only process messages that tag @toss
+    if (!isMessageForTossBot(content)) {
+      console.log(`Ignoring message not tagged for toss bot: ${content}`);
+      continue;
+    }
+
+    const strippedContent = stripTag(content);
+    console.log(`Received message for toss bot: ${strippedContent} from ${message.senderInboxId}`);
 
     // Get the conversation
     const conversation = await client.conversations.getConversationById(
@@ -109,7 +136,11 @@ export async function startMessageListener(client: Client, handleMessage: Messag
       continue;
     }
 
+    // Check if this is a group chat
+    const isGroup = 'members' in conversation;
+    console.log(`Conversation is${isGroup ? '' : ' not'} a group chat`);
+
     // Handle the message
-    await handleMessage(message, conversation);
+    await handleMessage(message, conversation, message.senderInboxId, strippedContent);
   }
 } 

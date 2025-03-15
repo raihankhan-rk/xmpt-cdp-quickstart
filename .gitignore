@@ -11,6 +11,8 @@ build/
 
 # CDP Wallet Data
 wallet_data/
+data/
+.data/
 
 # Logs and temporary files
 npm-debug.log*

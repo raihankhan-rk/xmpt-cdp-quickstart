@@ -1,28 +1,47 @@
 import * as dotenv from "dotenv";
+import * as path from "path";
 import { LocalStorageProvider, RedisStorageProvider } from "./storage.js";
 import { GameManager } from "./game.js";
-import { initializeAgent, processMessage } from "./cdp.js";
-import { initializeXmtpClient, startMessageListener } from "./xmtp.js";
-import { GameStatus } from "./types.js";
+import { initializeXmtpClient, startMessageListener, createSigner } from "./xmtp.js";
 
-// Initialize environment variables
-dotenv.config();
+// Initialize environment variables - make sure this is at the top of the file before any other code
+const envPath = path.resolve(process.cwd(), '.env');
+console.log("Loading .env file from:", envPath);
+const result = dotenv.config({ path: envPath });
+if (result.error) {
+  console.error("Error loading .env file:", result.error);
+} else {
+  console.log("Environment variables loaded from .env file successfully");
+}
 
 /**
  * Validates that required environment variables are set
  */
 function validateEnvironment(): void {
+  // Load .env from parent directory
+  dotenv.config({ path: '../.env' });
   const missingVars: string[] = [];
 
   // Check required variables
   const requiredVars = [
-    "OPENAI_API_KEY",
-    "CDP_API_KEY_NAME",
-    "CDP_API_KEY_PRIVATE_KEY",
     "WALLET_KEY",
     "ENCRYPTION_KEY",
+    "OPENAI_API_KEY",
   ];
-
+  
+  // Check Coinbase SDK variables - we need either the COINBASE_ or CDP_ prefixed versions
+  const coinbaseApiKeyName = process.env.COINBASE_API_KEY_NAME || process.env.CDP_API_KEY_NAME;
+  const coinbaseApiKeyPrivateKey = process.env.COINBASE_API_KEY_PRIVATE_KEY || process.env.CDP_API_KEY_PRIVATE_KEY;
+  
+  if (!coinbaseApiKeyName) {
+    missingVars.push("COINBASE_API_KEY_NAME or CDP_API_KEY_NAME");
+  }
+  
+  if (!coinbaseApiKeyPrivateKey) {
+    missingVars.push("COINBASE_API_KEY_PRIVATE_KEY or CDP_API_KEY_PRIVATE_KEY");
+  }
+  
+  // Check other required variables
   requiredVars.forEach((varName) => {
     if (!process.env[varName]) {
       missingVars.push(varName);
@@ -37,47 +56,37 @@ function validateEnvironment(): void {
     });
     process.exit(1);
   }
-
-  // Warn about optional variables
-  if (!process.env.NETWORK_ID) {
-    console.warn(
-      "Warning: NETWORK_ID not set, defaulting to base-mainnet"
-    );
+  
+  // Log warning about KEY variable
+  if (!process.env.KEY) {
+    console.warn("Warning: KEY is not set, using ENCRYPTION_KEY for wallet encryption");
   }
-
-  if (!process.env.REDIS_URL) {
-    console.warn(
-      "Warning: REDIS_URL not set, using local file storage for wallet data"
-    );
-  }
+  
+  return; // Explicit return to satisfy the linter
 }
 
 /**
  * Handle incoming messages
  */
-async function handleMessage(message: any, conversation: any) {
-  // Initialize storage provider (Redis if REDIS_URL is set, otherwise local)
-  const storage = process.env.REDIS_URL
-    ? new RedisStorageProvider()
-    : new LocalStorageProvider();
-
-  const gameManager = new GameManager(storage);
-
-  // Use the sender's address as the user ID
-  const userId = message.senderInboxId;
-
+async function handleMessage(message: any, conversation: any, userId: string, content: string) {
   try {
-    // Initialize agent for this user
-    const { agent, config } = await initializeAgent(userId, storage);
+    // Initialize storage provider (Redis if REDIS_URL is set, otherwise local)
+    const storage = process.env.REDIS_URL
+      ? new RedisStorageProvider()
+      : new LocalStorageProvider();
+
+    // Get agent address from XMTP client
+    const client = conversation.client;
+    const signer = await createSigner(process.env.WALLET_KEY!);
+    const address = (await signer.getIdentifier()).identifier;
+
+    const gameManager = new GameManager(storage, address);
 
     // Process the message content
-    const content = message.content as string;
     const response = await handleCommand(
       content,
       userId,
-      gameManager,
-      agent,
-      config
+      gameManager
     );
 
     // Send the response back
@@ -90,148 +99,98 @@ async function handleMessage(message: any, conversation: any) {
   }
 }
 
-async function verifyPayment(
-  agent: any,
-  config: any,
-  amount: string,
-  gameWallet: string
-): Promise<boolean> {
-  // First check USDC balance of game wallet
-  const balanceResponse = await processMessage(
-    agent,
-    config,
-    `Check USDC balance of ${gameWallet}`
-  );
-  console.log("balanceResponse: ", balanceResponse);
-
-  // Extract balance from response
-  const balanceMatch = balanceResponse.match(/(\d+(\.\d+)?)/);
-  if (!balanceMatch) {
-    return false;
-  }
-
-  const balance = parseFloat(balanceMatch[0]);
-  const requiredAmount = parseFloat(amount);
-
-  // Verify the game wallet has received the payment
-  return balance >= requiredAmount;
-}
-
 async function handleCommand(
   content: string,
   userId: string,
-  gameManager: GameManager,
-  agent: any,
-  config: any
+  gameManager: GameManager
 ): Promise<string> {
   const [command, ...args] = content.split(" ");
 
   switch (command.toLowerCase()) {
-    case "/create": {
+    case "create": {
       const amount = args[0];
       if (!amount) {
-        return "Please specify a bet amount: /create <amount>";
+        return "Please specify a bet amount: create <amount>";
       }
 
-      // Check if user has sufficient balance first
-      const balanceResponse = await processMessage(
-        agent,
-        config,
-        "what is my wallet address"
-      );
-      console.log("user balanceResponse: ", balanceResponse);
-      const balanceMatch = balanceResponse.match(/(\d+(\.\d+)?)/);
-      if (!balanceMatch || parseFloat(balanceMatch[0]) < parseFloat(amount)) {
-        return `Insufficient USDC balance. You need at least ${amount} USDC to create a game.`;
+      // Check if user has sufficient balance
+      const balance = await gameManager.getUserBalance(userId);
+      if (balance < parseFloat(amount)) {
+        return `Insufficient USDC balance. You need at least ${amount} USDC to create a game. Your balance: ${balance} USDC`;
       }
 
       const game = await gameManager.createGame(userId, amount);
-      return `Game created!\nGame ID: ${game.id}\nBet Amount: ${game.betAmount} USDC\nTo join, send ${game.betAmount} USDC to ${game.walletAddress} and then use /join ${game.id}`;
+      return `Game created!\nGame ID: ${game.id}\nBet Amount: ${game.betAmount} USDC\nTo join, send me: join ${game.id}`;
     }
 
-    case "/join": {
+    case "join": {
       const gameId = args[0];
       if (!gameId) {
-        return "Please specify a game ID: /join <gameId>";
+        return "Please specify a game ID: join <gameId>";
       }
 
       // First check if the game exists and is joinable
       const game = await gameManager.joinGame(gameId, userId);
       
-      // Check user's balance first
-      const balanceResponse = await processMessage(
-        agent,
-        config,
-        "Check my USDC balance"
-      );
-      console.log("user balanceResponse: ", balanceResponse);
-
-      const balanceMatch = balanceResponse.match(/(\d+(\.\d+)?)/);
-      if (!balanceMatch || parseFloat(balanceMatch[0]) < parseFloat(game.betAmount)) {
-        return `Insufficient USDC balance. You need ${game.betAmount} USDC to join this game.`;
+      // Check user's balance
+      const balance = await gameManager.getUserBalance(userId);
+      if (balance < parseFloat(game.betAmount)) {
+        return `Insufficient USDC balance. You need ${game.betAmount} USDC to join this game. Your balance: ${balance} USDC`;
       }
 
-      // Try to send the payment
-      const sendResponse = await processMessage(
-        agent,
-        config,
-        `Send ${game.betAmount} USDC to ${game.walletAddress}`
+      // Make the payment
+      const paymentSuccess = await gameManager.makePayment(
+        userId,
+        gameId,
+        game.betAmount
       );
 
-      // Verify the payment was successful
-      const hasPaid = await verifyPayment(agent, config, game.betAmount, game.walletAddress);
-      if (!hasPaid) {
-        return `Payment failed or not confirmed yet. Please ensure you have sent ${game.betAmount} USDC to ${game.walletAddress} and try again.`;
+      if (!paymentSuccess) {
+        return `Payment failed. Please ensure you have enough USDC and try again.`;
       }
-
-      // Add player to game after payment confirmation
+      
+      // Add player to game after payment
       const updatedGame = await gameManager.addPlayerToGame(gameId, userId, true);
       
-      if (updatedGame.status === GameStatus.READY) {
+      if (updatedGame.status === "READY") {
         const result = await gameManager.executeCoinToss(gameId);
         
-        // Transfer winnings to the winner
-        const winAmount = (parseFloat(result.betAmount) * 2).toString();
-        const transferResponse = await processMessage(
-          agent,
-          config,
-          `Transfer ${winAmount} USDC from ${result.walletAddress} to ${result.winner}`
-        );
-
-        return `Game joined and completed!\n${sendResponse}\n\nCoin toss result: ${result.winner === userId ? "You won!" : "You lost!"}\nWinner: ${result.winner}\n\nPayout: ${transferResponse}`;
+        return `Game joined and completed!\n\nCoin toss result: ${result.winner === userId ? "You won!" : "You lost!"}\nWinner: ${result.winner}\n\nWinnings have been transferred to the winner's wallet.`;
       }
       
-      return `Successfully joined game ${gameId}. ${sendResponse}\nWaiting for another player.`;
+      return `Successfully joined game ${gameId}. Payment of ${game.betAmount} USDC sent. Waiting for another player.`;
     }
 
-    case "/list": {
+    case "list": {
       const games = await gameManager.listActiveGames();
       if (games.length === 0) {
         return "No active games found.";
       }
 
-      return games
-        .map(
-          (game) =>
-            `Game ID: ${game.id}\nBet Amount: ${game.betAmount} USDC\nStatus: ${game.status}\nCreated by: ${game.creator}\nParticipants: ${game.participants.length}/2\nGame Wallet: ${game.walletAddress}`
-        )
-        .join("\n\n");
+      // Fix the type issue by making sure each iteration returns a string
+      const gameDescriptions = games.map(
+        (game) =>
+          `Game ID: ${game.id}\nBet Amount: ${game.betAmount} USDC\nStatus: ${game.status}\nCreated by: ${game.creator}\nParticipants: ${game.participants.length}/2\nGame Wallet: ${game.walletAddress}`
+      );
+      
+      return gameDescriptions.join("\n\n");
     }
 
-    case "/balance": {
-      return processMessage(agent, config, "Check my USDC balance");
+    case "balance": {
+      const balance = await gameManager.getUserBalance(userId);
+      return `Your USDC balance: ${balance}`;
     }
 
-    case "/help":
+    case "help":
       return `Available commands:
-/create <amount> - Create a new coin toss game with specified USDC bet amount
-/join <gameId> - Join an existing game with the specified ID (requires sending USDC first)
-/list - List all active games
-/balance - Check your wallet balance
-/help - Show this help message`;
+create <amount> - Create a new coin toss game with specified USDC bet amount
+join <gameId> - Join an existing game with the specified ID
+list - List all active games
+balance - Check your wallet balance
+help - Show this help message`;
 
     default:
-      return "Unknown command. Type /help to see available commands.";
+      return "Unknown command. Type help to see available commands.";
   }
 }
 
@@ -248,4 +207,4 @@ async function main(): Promise<void> {
   await startMessageListener(xmtpClient, handleMessage);
 }
 
-main().catch(console.error); 
+main().catch(console.error);
