@@ -26,6 +26,9 @@ lerna-debug.log*
 *.db3-*
 *.db3
 
+group_reference/
+reference/
+
 # Environment variables
 .env
 .env.local

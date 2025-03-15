@@ -1,4 +1,5 @@
-import { Client, type XmtpEnv } from "@xmtp/node-sdk";
+import { Client, type Signer, type XmtpEnv } from "@xmtp/node-sdk";
+import { IdentifierKind } from "@xmtp/node-bindings";
 import { fromString } from "uint8arrays";
 import { createWalletClient, http, toBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -9,7 +10,7 @@ import { sepolia } from "viem/chains";
  * @param walletKey - Wallet private key as a hex string
  * @returns A signer object compatible with XMTP
  */
-function createSigner(walletKey: string) {
+function createSigner(walletKey: string): Signer {
   const account = privateKeyToAccount(walletKey as `0x${string}`);
   const wallet = createWalletClient({
     account,
@@ -18,8 +19,11 @@ function createSigner(walletKey: string) {
   });
 
   return {
-    walletType: "EOA" as const,
-    getAddress: () => account.address,
+    type: "EOA" as const,
+    getIdentifier: () => ({
+      identifierKind: IdentifierKind.Ethereum,
+      identifier: account.address.toLowerCase(),
+    }),
     signMessage: async (message: string) => {
       const signature = await wallet.signMessage({
         message,
@@ -64,8 +68,10 @@ export async function initializeXmtpClient() {
   console.log("Syncing conversations...");
   await client.conversations.sync();
 
+  const identifier = await signer.getIdentifier();
+
   console.log(
-    `Agent initialized on ${client.accountAddress}\nSend a message on http://xmtp.chat/dm/${client.accountAddress}?env=${env}`
+    `Agent initialized on ${identifier.identifier}\nSend a message on http://xmtp.chat/dm/${identifier.identifier}?env=${env}`
   );
 
   return { client, env };
