@@ -5,6 +5,8 @@ A decentralized coin toss betting agent built with XMTP and Coinbase SDK. This a
 ## Features
 
 - XMTP group chat support (responds to @toss mentions)
+- Natural language bet creation ("Will it rain tomorrow for 10 USDC")
+- Support for custom betting topics and options
 - Create coin toss games with customizable USDC bet amounts
 - Support for multiple players in a single game
 - Player identification system for easy player tracking
@@ -45,7 +47,7 @@ cp .env.example .env
 
 - `WALLET_KEY`: Your agent's wallet private key for XMTP
 - `ENCRYPTION_KEY`: XMTP encryption key
-- `OPENAI_API_KEY`: Your OpenAI API key (if needed)
+- `OPENAI_API_KEY`: Your OpenAI API key (required for natural language betting)
 - `KEY`: Encryption key for local wallet storage (or use ENCRYPTION_KEY if not provided)
 
 ### Coinbase API Configuration (required)
@@ -95,34 +97,50 @@ The agent operates in group chats and responds when tagged with `@toss`.
 ### Available Commands
 
 - `@toss create <amount>` - Create a new coin toss game with specified USDC bet amount
-- `@toss join <gameId>` - Join an existing game with the specified ID
+- `@toss join <gameId> <option>` - Join an existing game with the specified ID, choosing your option
 - `@toss execute <gameId>` - Execute the coin toss (only for game creator)
 - `@toss status <gameId>` - Check the status of a specific game
 - `@toss list` - List all active games
 - `@toss balance` - Check your wallet balance and address
 - `@toss help` - Show available commands
+- `@toss <natural language bet>` - Create a bet using natural language (e.g., "Will it rain tomorrow for 5 USDC")
+
+### Natural Language Betting
+
+The agent can parse natural language betting prompts:
+
+- `@toss Will it rain tomorrow for 5` - Creates a yes/no bet with 5 USDC
+- `@toss Lakers vs Celtics game for 10` - Creates a bet with Lakers and Celtics as options
+- `@toss Will Bitcoin reach $100k this year? 2` - Creates a yes/no bet with 2 USDC
+
+If no amount is specified, the agent defaults to 0.1 USDC. If no options are specified, the agent defaults to "yes" and "no".
 
 ### Example Flow
 
 1. **Invite the bot** to your XMTP group chat
 
-2. **Create a game**:
+2. **Create a game** using either:
    ```
    @toss create 0.01
    ```
-   This creates a game with a 0.01 USDC bet. The creator is assigned Player ID P1 and automatically pays the bet amount.
+   or with natural language:
+   ```
+   @toss Will Bitcoin hit $100k this year for 5
+   ```
+   This creates a game with the specified bet parameters.
 
-3. **Other players join** using the game ID:
+3. **Join the game**, including the creator:
    ```
-   @toss join 1
+   @toss join 1 yes
    ```
-   Each player is assigned a Player ID (P2, P3, etc.) and pays the bet amount.
+   Everyone must specify their chosen option (yes/no or other options defined in the bet).
+   Each player is assigned a Player ID (P1, P2, etc.) based on join order.
 
 4. **Check game status** any time:
    ```
    @toss status 1
    ```
-   Shows current players, bet amount, prize pool, and other details.
+   Shows current players, their chosen options, bet amount, prize pool, and other details.
 
 5. **Execute the coin toss** (creator only):
    ```
@@ -130,7 +148,7 @@ The agent operates in group chats and responds when tagged with `@toss`.
    ```
    When the creator is ready, they execute the coin toss. A random winner is chosen, and the prize pool is transferred to their wallet.
 
-6. **Results** are displayed showing all players, the winner, and payment confirmation.
+6. **Results** are displayed showing the bet topic, options, all players with their choices, the winner, and payment confirmation.
 
 ## Player Identification
 
@@ -144,9 +162,11 @@ Player wallet addresses are displayed in all game information for transparency.
 
 - All bets are collected in a dedicated game wallet
 - Total prize pool = bet amount × number of players
-- When the game creator executes the coin toss, a random winner is selected
-- The entire prize pool is transferred to the winner's wallet
-- Payment status is reported after the game
+- When the game creator executes the coin toss, a winning option is randomly selected
+- All players who chose the winning option share the prize pool equally
+- For example, if "Yes" is the winning option, all players who bet on "Yes" will split the pool
+- Payment status is reported after the game, including each winner's share
+- The prize distribution is automatic and transparent
 
 ## Troubleshooting
 
@@ -198,11 +218,16 @@ rm -rf .data/wallets
 
 - **Wallet Management**: Direct integration with Coinbase SDK for wallet creation and transfers
 - **XMTP Integration**: Group chat support with @toss tag handling
+- **Unified Agent System**: 
+  - Single AI agent powered by AgentKit for both natural language parsing and wallet operations
+  - Handles natural language bet creation and structured commands
+  - Simplifies the codebase for better maintainability
 - **Game Logic**: 
   - Dedicated wallet per game and user
   - Support for multiple players
   - Creator-controlled execution
-  - Random winner selection
+  - Random selection of winning option
+  - All players who chose the winning option share the prize
   - Automatic prize distribution
 - **Storage Options**: Local storage or Redis for games and wallet data
 

@@ -3,6 +3,7 @@ import * as path from "path";
 import { LocalStorageProvider, RedisStorageProvider } from "./storage.js";
 import { GameManager } from "./game.js";
 import { initializeXmtpClient, startMessageListener, createSigner } from "./xmtp.js";
+import { initializeAgent } from "./cdp.js";
 
 // Initialize environment variables - make sure this is at the top of the file before any other code
 const envPath = path.resolve(process.cwd(), '.env');
@@ -13,6 +14,11 @@ if (result.error) {
 } else {
   console.log("Environment variables loaded from .env file successfully");
 }
+
+// Global CDP agent instance - we'll initialize this at startup for better performance
+let cdpAgent: any = null;
+let cdpAgentConfig: any = null;
+let storage: any = null;
 
 /**
  * Validates that required environment variables are set
@@ -70,11 +76,6 @@ function validateEnvironment(): void {
  */
 async function handleMessage(message: any, conversation: any, userId: string, content: string) {
   try {
-    // Initialize storage provider (Redis if REDIS_URL is set, otherwise local)
-    const storage = process.env.REDIS_URL
-      ? new RedisStorageProvider()
-      : new LocalStorageProvider();
-
     // Get agent address from XMTP client
     const client = conversation.client;
     const signer = await createSigner(process.env.WALLET_KEY!);
@@ -86,7 +87,9 @@ async function handleMessage(message: any, conversation: any, userId: string, co
     const response = await handleCommand(
       content,
       userId,
-      gameManager
+      gameManager,
+      cdpAgent,
+      cdpAgentConfig
     );
 
     // Send the response back
@@ -102,10 +105,30 @@ async function handleMessage(message: any, conversation: any, userId: string, co
 async function handleCommand(
   content: string,
   userId: string,
+  gameManager: GameManager,
+  agent: any,
+  agentConfig: any
+): Promise<string> {
+  const commandParts = content.split(" ");
+  const firstWord = commandParts[0].toLowerCase();
+  
+  // Check if the first word is a command
+  if (["create", "join", "execute", "status", "list", "balance", "help"].includes(firstWord)) {
+    // Handle traditional command formatting
+    const [command, ...args] = commandParts;
+    return handleExplicitCommand(command, args, userId, gameManager);
+  } else {
+    // This is likely a natural language prompt
+    return handleNaturalLanguageCommand(content, userId, gameManager, agent, agentConfig);
+  }
+}
+
+async function handleExplicitCommand(
+  command: string,
+  args: string[],
+  userId: string,
   gameManager: GameManager
 ): Promise<string> {
-  const [command, ...args] = content.split(" ");
-
   switch (command.toLowerCase()) {
     case "create": {
       const amount = args[0];
@@ -119,19 +142,46 @@ async function handleCommand(
         return `Insufficient USDC balance. You need at least ${amount} USDC to create a game. Your balance: ${balance} USDC`;
       }
 
-      // Create the game (creator payment will be handled automatically)
+      // Create the game - creator doesn't join automatically now
       const game = await gameManager.createGame(userId, amount);
-      return `Game created!\nGame ID: ${game.id}\nBet Amount: ${game.betAmount} USDC\nYour Player ID: P1 (Creator)\n\nOther players can join with: join ${game.id}\nWhen you're ready to run the coin toss, send: execute ${game.id}`;
+      
+      // Generate response with bet options if they exist
+      let optionsMessage = "";
+      if (game.betOptions && game.betOptions.length > 0) {
+        optionsMessage = `\nOptions: ${game.betOptions.join(', ')}\n\nYou need to join your own game by choosing an option: join ${game.id} <option>`;
+      } else {
+        optionsMessage = `\n\nYou need to join your own game first: join ${game.id} yes/no`;
+      }
+      
+      return `Game created!\nGame ID: ${game.id}\nBet Amount: ${game.betAmount} USDC${
+        game.betTopic ? `\nTopic: ${game.betTopic}` : ''
+      }${optionsMessage}\n\nOther players can join with: join ${game.id} <option>\nWhen everyone has joined, you can run: execute ${game.id}`;
     }
 
     case "join": {
+      // Check if we have enough arguments
+      if (args.length < 1) {
+        return "Please specify a game ID and your chosen option: join <gameId> <option>";
+      }
+      
       const gameId = args[0];
+      const chosenOption = args.length >= 2 ? args[1] : null;
+      
       if (!gameId) {
-        return "Please specify a game ID: join <gameId>";
+        return "Please specify a game ID: join <gameId> <option>";
       }
 
       // First check if the game exists and is joinable
       const game = await gameManager.joinGame(gameId, userId);
+      
+      // Check if an option was provided
+      if (!chosenOption) {
+        const availableOptions = game.betOptions && game.betOptions.length > 0 
+          ? game.betOptions.join(', ') 
+          : "yes, no";
+          
+        return `Please specify your option when joining: join ${gameId} <option>\nAvailable options: ${availableOptions}`;
+      }
       
       // Check user's balance
       const balance = await gameManager.getUserBalance(userId);
@@ -143,7 +193,8 @@ async function handleCommand(
       const paymentSuccess = await gameManager.makePayment(
         userId,
         gameId,
-        game.betAmount
+        game.betAmount,
+        chosenOption
       );
 
       if (!paymentSuccess) {
@@ -151,13 +202,30 @@ async function handleCommand(
       }
       
       // Add player to game after payment
-      const updatedGame = await gameManager.addPlayerToGame(gameId, userId, true);
+      const updatedGame = await gameManager.addPlayerToGame(gameId, userId, chosenOption, true);
       
       // Generate player ID (P2, P3, etc. based on position)
       const playerPosition = updatedGame.participants.findIndex(p => p === userId) + 1;
       const playerId = `P${playerPosition}`;
       
-      return `Successfully joined game ${gameId}! Payment of ${game.betAmount} USDC sent.\nYour Player ID: ${playerId}\nTotal players: ${updatedGame.participants.length}\nWaiting for the game creator to execute the coin toss.`;
+      // Include bet topic and options in the response if available
+      let responseMessage = `Successfully joined game ${gameId}! Payment of ${game.betAmount} USDC sent.\nYour Player ID: ${playerId}\nYour Choice: ${chosenOption}\nTotal players: ${updatedGame.participants.length}`;
+      
+      if (updatedGame.betTopic) {
+        responseMessage += `\nBet Topic: "${updatedGame.betTopic}"`;
+        
+        if (updatedGame.betOptions && updatedGame.betOptions.length === 2) {
+          responseMessage += `\nOptions: ${updatedGame.betOptions[0]} or ${updatedGame.betOptions[1]}`;
+        }
+      }
+      
+      if (userId === game.creator) {
+        responseMessage += `\n\nAs the creator, you can execute the coin toss with: execute ${gameId}`;
+      } else {
+        responseMessage += `\n\nWaiting for the game creator to execute the coin toss.`;
+      }
+      
+      return responseMessage;
     }
 
     case "execute": {
@@ -180,7 +248,18 @@ async function handleCommand(
         return "At least 2 players are needed to execute the coin toss.";
       }
       
-      const result = await gameManager.executeCoinToss(gameId);
+      let result;
+      try {
+        result = await gameManager.executeCoinToss(gameId);
+        
+        // Check if the coin toss was successful and a winner was determined
+        if (!result.winner) {
+          return "The coin toss failed to determine a winner. Please try again.";
+        }
+      } catch (error) {
+        console.error("Error executing coin toss:", error);
+        return `Error executing coin toss: ${error instanceof Error ? error.message : "Unknown error"}`;
+      }
       
       // Generate player IDs for result message
       const playerMap = await Promise.all(result.participants.map(async (player, index) => {
@@ -196,29 +275,60 @@ async function handleCommand(
       const winnerInfo = playerMap.find(p => p.address === result.winner);
       const winnerId = winnerInfo ? winnerInfo.id : "Unknown";
       
+      // Find winner's chosen option
+      const winnerOption = result.participantOptions?.find(p => p.userId === result.winner)?.option || "Unknown";
+      
       // Create detailed result message
       let resultMessage = `🎲 COIN TOSS RESULTS FOR GAME #${gameId} 🎲\n\n`;
+      
+      // Add bet topic if available
+      if (result.betTopic) {
+        resultMessage += `📝 Bet: "${result.betTopic}"\n`;
+        
+        if (result.betOptions && result.betOptions.length === 2) {
+          resultMessage += `🎯 Options: ${result.betOptions[0]} or ${result.betOptions[1]}\n\n`;
+        }
+      }
+      
       resultMessage += `Players (${result.participants.length}):\n`;
       
+      // List all players with their chosen options
       playerMap.forEach(p => {
         const displayAddress = p.walletAddress.substring(0, 10) + "..." + p.walletAddress.substring(p.walletAddress.length - 6);
-        resultMessage += `${p.id}: ${displayAddress}\n`;
+        const playerOption = result.participantOptions?.find(opt => opt.userId === p.address)?.option || "Unknown";
+        resultMessage += `${p.id}: ${displayAddress} (Chose: ${playerOption})\n`;
       });
       
-      resultMessage += `\n💰 Total Pot: ${parseFloat(result.betAmount) * result.participants.length} USDC\n`;
-      resultMessage += `🎯 Coin Toss Result: ${result.coinTossResult || "Unknown"}\n\n`;
-      resultMessage += `🏆 WINNER: ${winnerId}\n`;
+      // Calculate total pot
+      const totalPot = parseFloat(result.betAmount) * result.participants.length;
+      resultMessage += `\n💰 Total Pot: ${totalPot} USDC\n`;
       
-      // Get winner's wallet address
-      const winnerWallet = winnerInfo?.walletAddress || (result.winner ? await gameManager.getPlayerWalletAddress(result.winner) : undefined);
-      if (winnerWallet) {
-        resultMessage += `🏆 Winner Wallet: ${winnerWallet}\n\n`;
+      // Show the winning option (former coin toss result)
+      resultMessage += `🎯 Winning Option: ${result.coinTossResult || "Unknown"}\n\n`;
+      
+      // Multiple winners handling - identify all players who chose the winning option
+      const winnerIds = result.winner ? result.winner.split(',') : [];
+      const winningPlayers = playerMap.filter(p => winnerIds.includes(p.address));
+      
+      if (winningPlayers.length > 0) {
+        // Calculate prize per winner
+        const prizePerWinner = totalPot / winningPlayers.length;
+        
+        resultMessage += `🏆 WINNERS (${winningPlayers.length}):\n`;
+        winningPlayers.forEach(winner => {
+          const displayAddress = winner.walletAddress.substring(0, 10) + "..." + winner.walletAddress.substring(winner.walletAddress.length - 6);
+          resultMessage += `${winner.id}: ${displayAddress}\n`;
+        });
+        
+        resultMessage += `\n💸 Prize per winner: ${prizePerWinner.toFixed(6)} USDC\n\n`;
+      } else {
+        resultMessage += "No winners found.\n\n";
       }
       
       if (result.paymentSuccess) {
-        resultMessage += `✅ Winnings have been transferred to the winner's wallet.`;
+        resultMessage += `✅ Winnings have been transferred to the winners' wallets.`;
         
-        // Add transaction hash link if available
+        // Add transaction link if available
         if (result.transactionLink) {
           resultMessage += `\n🔗 Transaction: ${result.transactionLink}`;
         }
@@ -251,6 +361,16 @@ async function handleCommand(
       }));
       
       let statusMessage = `🎮 GAME #${gameId} STATUS 🎮\n\n`;
+      
+      // Add bet topic if available
+      if (game.betTopic) {
+        statusMessage += `📝 Bet: "${game.betTopic}"\n`;
+        
+        if (game.betOptions && game.betOptions.length === 2) {
+          statusMessage += `🎯 Options: ${game.betOptions[0]} or ${game.betOptions[1]}\n\n`;
+        }
+      }
+      
       statusMessage += `Status: ${game.status}\n`;
       statusMessage += `Bet Amount: ${game.betAmount} USDC\n`;
       statusMessage += `Prize Pool: ${parseFloat(game.betAmount) * game.participants.length} USDC\n`;
@@ -270,15 +390,36 @@ async function handleCommand(
       } else {
         playerMap.forEach(p => {
           const displayAddress = p.walletAddress.substring(0, 10) + "..." + p.walletAddress.substring(p.walletAddress.length - 6);
-          statusMessage += `${p.id}: ${displayAddress}\n`;
+          const playerOption = game.participantOptions?.find(opt => opt.userId === p.address)?.option || "Unknown";
+          statusMessage += `${p.id}: ${displayAddress} (Chose: ${playerOption})\n`;
         });
       }
       
       if (game.winner) {
-        const winnerInfo = playerMap.find(p => p.address === game.winner);
-        const winnerId = winnerInfo ? winnerInfo.id : "Unknown";
-        const winnerWallet = winnerInfo?.walletAddress || await gameManager.getPlayerWalletAddress(game.winner) || game.winner;
-        statusMessage += `\nWinner: ${winnerId} (${winnerWallet.substring(0, 10)}...${winnerWallet.substring(winnerWallet.length - 6)})\n`;
+        // Check if we have multiple winners
+        if (game.winner.includes(',')) {
+          const winnerIds = game.winner.split(',');
+          const winningPlayers = playerMap.filter(p => winnerIds.includes(p.address));
+          
+          statusMessage += `\nWinning Option: ${game.coinTossResult || "Unknown"}\n`;
+          statusMessage += `Winners (${winningPlayers.length}):\n`;
+          
+          for (const winner of winningPlayers) {
+            const displayAddress = winner.walletAddress.substring(0, 10) + "..." + winner.walletAddress.substring(winner.walletAddress.length - 6);
+            statusMessage += `${winner.id}: ${displayAddress}\n`;
+          }
+          
+          if (winningPlayers.length > 0) {
+            const prizePerWinner = (parseFloat(game.betAmount) * game.participants.length) / winningPlayers.length;
+            statusMessage += `Prize per winner: ${prizePerWinner.toFixed(6)} USDC\n`;
+          }
+        } else {
+          // Single winner (for backwards compatibility)
+          const winnerInfo = playerMap.find(p => p.address === game.winner);
+          const winnerId = winnerInfo ? winnerInfo.id : "Unknown";
+          const winnerWallet = winnerInfo?.walletAddress || await gameManager.getPlayerWalletAddress(game.winner) || game.winner;
+          statusMessage += `\nWinner: ${winnerId} (${winnerWallet.substring(0, 10)}...${winnerWallet.substring(winnerWallet.length - 6)})\n`;
+        }
       }
       
       return statusMessage;
@@ -310,15 +451,66 @@ async function handleCommand(
     case "help":
       return `Available commands:
 create <amount> - Create a new coin toss game with specified USDC bet amount
-join <gameId> - Join an existing game with the specified ID
+join <gameId> <option> - Join an existing game with the specified ID and your chosen option
 execute <gameId> - Execute the coin toss (only for game creator)
 status <gameId> - Check the status of a specific game
 list - List all active games
 balance - Check your wallet balance and address
-help - Show this help message`;
+help - Show this help message
+
+You can also create a bet using natural language, for example:
+"Will it rain tomorrow for 5" - Creates a yes/no bet with 5 USDC
+"Lakers vs Celtics for 10" - Creates a bet with Lakers and Celtics as options with 10 USDC`;
 
     default:
       return "Unknown command. Type help to see available commands.";
+  }
+}
+
+async function handleNaturalLanguageCommand(
+  prompt: string,
+  userId: string,
+  gameManager: GameManager,
+  agent: any,
+  agentConfig: any
+): Promise<string> {
+  try {
+    if (!agent || !agentConfig) {
+      return "I can't process natural language bets at the moment. Please use the explicit commands format or try again later.";
+    }
+    
+    console.log(`🧠 Processing natural language prompt: "${prompt}"`);
+    
+    // Check if user has sufficient balance (default check for minimum amount)
+    const balance = await gameManager.getUserBalance(userId);
+    if (balance < 0.01) {
+      return `Insufficient USDC balance. You need at least 0.01 USDC to create a bet. Your balance: ${balance} USDC`;
+    }
+
+    // Create a game using the natural language prompt
+    const game = await gameManager.createGameFromPrompt(userId, prompt, agent, agentConfig);
+    
+    // Create a detailed response with the parsed information
+    let response = `🎲 Bet Created! 🎲\n\n`;
+    response += `Game ID: ${game.id}\n`;
+    response += `Topic: "${game.betTopic}"\n`;
+    
+    if (game.betOptions && game.betOptions.length === 2) {
+      response += `Options: ${game.betOptions[0]} or ${game.betOptions[1]}\n`;
+    }
+    
+    response += `Bet Amount: ${game.betAmount} USDC\n\n`;
+    response += `You need to join your own game first by choosing an option: join ${game.id} <option>\n\n`;
+    response += `Other players can join with: join ${game.id} <option>\n`;
+    response += `When everyone has joined, you can execute the toss with: execute ${game.id}`;
+    
+    return response;
+  } catch (error) {
+    console.error("Error processing natural language command:", error);
+    return `Sorry, I couldn't process your natural language bet. Please try again with a different wording or use explicit commands.
+
+Example: "Will the price of Bitcoin reach $100k this year for 5"
+Or use: create <amount> - to create a standard coin toss game`;
   }
 }
 
@@ -327,6 +519,28 @@ async function main(): Promise<void> {
 
   // Validate environment variables
   validateEnvironment();
+  
+  // Initialize storage at startup
+  storage = process.env.REDIS_URL
+    ? new RedisStorageProvider()
+    : new LocalStorageProvider();
+  
+  // Initialize the CDP agent at startup for better performance
+  if (process.env.OPENAI_API_KEY) {
+    console.log("Initializing CDP agent (this might take a moment but will improve message handling speed)...");
+    try {
+      // Use a placeholder userId for initial setup
+      const initResult = await initializeAgent("SYSTEM_INIT", storage);
+      cdpAgent = initResult.agent;
+      cdpAgentConfig = initResult.config;
+      console.log("✅ CDP agent initialized successfully");
+    } catch (error) {
+      console.error("Error initializing CDP agent:", error);
+      console.warn("⚠️ Will attempt to initialize agent on first message instead");
+    }
+  } else {
+    console.warn("⚠️ OPENAI_API_KEY is not set, natural language bet parsing will be disabled");
+  }
 
   // Initialize XMTP client
   const { client: xmtpClient } = await initializeXmtpClient();
