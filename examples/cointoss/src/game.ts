@@ -1,6 +1,5 @@
-import { CoinTossGame, GameStatus, StorageProvider, Participant } from "./types.js";
-import { WalletService, type AgentWalletData } from "./walletService.js";
-import { Coinbase } from "@coinbase/coinbase-sdk";
+import { CoinTossGame, GameStatus, StorageProvider } from "./types.js";
+import { WalletService } from "./walletService.js";
 import * as crypto from 'crypto';
 import { parseNaturalLanguageBet, type ParsedBet } from "./cdp.js";
 

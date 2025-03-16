@@ -6,7 +6,7 @@ import {
   Trade,
 } from "@coinbase/coinbase-sdk";
 import { keccak256, toHex, toBytes, isAddress } from "viem";
-import { LocalStorage } from "./localStorage.js";
+import { LocalStorage } from "./storage.js";
 
 // Defer SDK initialization until after environment variables are properly loaded
 function initializeCoinbaseSDK() {

@@ -3,43 +3,127 @@ import fs from "fs/promises";
 import path from "path";
 import { CoinTossGame, StorageProvider, UserWallet } from "./types.js";
 
-export class LocalStorageProvider implements StorageProvider {
-  private gamesDir: string;
-  private walletsDir: string;
+// Storage provider instance
+let storageInstance: StorageProvider | null = null;
 
-  constructor() {
-    this.gamesDir = path.join(process.cwd(), "data", "games");
-    this.walletsDir = path.join(process.cwd(), "wallet_data");
-    this.initDirectories();
+/**
+ * Initialize the storage provider based on environment variables
+ * Uses Redis if REDIS_URL is provided, otherwise falls back to local file storage
+ */
+export async function initializeStorage(): Promise<StorageProvider> {
+  if (storageInstance) {
+    return storageInstance;
   }
 
-  private async initDirectories() {
-    await fs.mkdir(this.gamesDir, { recursive: true });
-    await fs.mkdir(this.walletsDir, { recursive: true });
+  try {
+    if (process.env.REDIS_URL) {
+      console.log("Initializing Redis storage...");
+      storageInstance = new RedisStorageProvider();
+      console.log("Redis storage initialized successfully.");
+    } else {
+      console.log("Initializing local file storage...");
+      storageInstance = new LocalStorageProvider();
+      console.log("Local file storage initialized successfully.");
+    }
+  } catch (error) {
+    console.error("Failed to initialize storage:", error);
+    console.log("Falling back to local file storage...");
+    storageInstance = new LocalStorageProvider();
   }
 
-  async saveGame(game: CoinTossGame): Promise<void> {
-    const filePath = path.join(this.gamesDir, `${game.id}.json`);
-    await fs.writeFile(filePath, JSON.stringify(game, null, 2));
+  return storageInstance;
+}
+
+/**
+ * Generic local file storage for key-value data
+ */
+export class LocalStorage {
+  private baseDir: string;
+
+  constructor(baseDir: string) {
+    this.baseDir = baseDir;
+    this.initDirectory();
   }
 
-  async getGame(gameId: string): Promise<CoinTossGame | null> {
+  private async initDirectory() {
     try {
-      const filePath = path.join(this.gamesDir, `${gameId}.json`);
+      await fs.mkdir(this.baseDir, { recursive: true });
+    } catch (error) {
+      console.error("Error creating directory:", error);
+    }
+  }
+
+  async set(key: string, value: string) {
+    try {
+      const filePath = path.join(this.baseDir, `${key}.json`);
+      await fs.writeFile(filePath, value);
+      return true;
+    } catch (error) {
+      console.error("Error writing to storage:", error);
+      return false;
+    }
+  }
+
+  async get(key: string): Promise<string | null> {
+    try {
+      const filePath = path.join(this.baseDir, `${key}.json`);
       const data = await fs.readFile(filePath, "utf-8");
-      return JSON.parse(data);
+      return data;
     } catch (error) {
       return null;
     }
   }
 
+  async del(key: string): Promise<boolean> {
+    try {
+      const filePath = path.join(this.baseDir, `${key}.json`);
+      await fs.unlink(filePath);
+      return true;
+    } catch (error) {
+      console.error("Error deleting from storage:", error);
+      return false;
+    }
+  }
+
+  async getWalletCount(): Promise<number> {
+    try {
+      const files = await fs.readdir(this.baseDir);
+      const walletFiles = files.filter(file => file.startsWith("wallet:") && file.endsWith(".json"));
+      return walletFiles.length;
+    } catch (error) {
+      console.error("Error getting wallet count:", error);
+      return 0;
+    }
+  }
+}
+
+export class LocalStorageProvider implements StorageProvider {
+  private gamesStorage: LocalStorage;
+  private walletsStorage: LocalStorage;
+
+  constructor() {
+    this.gamesStorage = new LocalStorage(path.join(process.cwd(), "data", "games"));
+    this.walletsStorage = new LocalStorage(path.join(process.cwd(), "wallet_data"));
+  }
+
+  async saveGame(game: CoinTossGame): Promise<void> {
+    await this.gamesStorage.set(game.id, JSON.stringify(game, null, 2));
+  }
+
+  async getGame(gameId: string): Promise<CoinTossGame | null> {
+    const data = await this.gamesStorage.get(gameId);
+    return data ? JSON.parse(data) : null;
+  }
+
   async listActiveGames(): Promise<CoinTossGame[]> {
-    const files = await fs.readdir(this.gamesDir);
+    const gamesDir = path.join(process.cwd(), "data", "games");
+    const files = await fs.readdir(gamesDir);
     const games: CoinTossGame[] = [];
 
     for (const file of files) {
       if (file.endsWith(".json")) {
-        const game = await this.getGame(file.replace(".json", ""));
+        const gameId = file.replace(".json", "");
+        const game = await this.getGame(gameId);
         if (game && game.status !== "COMPLETED" && game.status !== "CANCELLED") {
           games.push(game);
         }
@@ -54,14 +138,14 @@ export class LocalStorageProvider implements StorageProvider {
   }
 
   async saveUserWallet(wallet: UserWallet): Promise<void> {
-    const filePath = path.join(this.walletsDir, `${wallet.userId}.json`);
-    await fs.writeFile(filePath, JSON.stringify(wallet, null, 2));
+    await this.walletsStorage.set(wallet.userId, JSON.stringify(wallet, null, 2));
   }
 
   async getUserWallet(userId: string): Promise<string | null> {
+    const data = await this.walletsStorage.get(userId);
+    if (!data) return null;
+    
     try {
-      const filePath = path.join(this.walletsDir, `${userId}.json`);
-      const data = await fs.readFile(filePath, "utf-8");
       const wallet = JSON.parse(data) as UserWallet;
       return wallet.walletData;
     } catch (error) {

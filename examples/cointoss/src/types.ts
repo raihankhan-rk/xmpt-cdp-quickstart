@@ -1,5 +1,3 @@
-import { CdpWalletProvider } from "@coinbase/agentkit";
-
 // Interface to track participant options
 export interface Participant {
   userId: string;
