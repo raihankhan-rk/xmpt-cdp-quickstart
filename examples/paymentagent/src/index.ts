@@ -1,7 +1,7 @@
 import * as dotenv from "dotenv";
 import { initializeStorage as initStorage } from "./storage.js";
 import { initializeXmtpClient, startMessageListener } from "./xmtp.js";
-import { initializeAgent, processMessage } from "./cdp.js";
+import { initializeAgent, processMessage } from "./langchain.js";
 
 // Initialize environment variables
 dotenv.config();
