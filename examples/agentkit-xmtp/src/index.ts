@@ -1,7 +1,7 @@
 import * as dotenv from "dotenv";
 import { initializeStorage as initStorage } from "./storage.js";
 import { initializeXmtpClient, startMessageListener } from "./xmtp.js";
-import { initializeAgent, processMessage } from "./langchain.js";
+import { initializeAgent, processMessage } from "./agent.js";
 
 // Initialize environment variables
 dotenv.config();
@@ -84,7 +84,7 @@ async function main(): Promise<void> {
   await initStorage();
 
   // Initialize XMTP client
-  const { client: xmtpClient } = await initializeXmtpClient();
+  const xmtpClient  = await initializeXmtpClient();
 
   // Start listening for messages
   await startMessageListener(xmtpClient, handleMessage);

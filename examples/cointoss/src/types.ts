@@ -1,17 +1,24 @@
-import { CdpWalletProvider } from "@coinbase/agentkit";
+// Interface to track participant options
+export interface Participant {
+  userId: string;
+  option: string;
+}
 
 export interface CoinTossGame {
   id: string;
   creator: string;
   betAmount: string;
   status: GameStatus;
-  participants: string[];
+  participants: string[];        // Maintaining for backward compatibility
+  participantOptions: Participant[]; // New field to track participant options
   winner?: string;
   walletAddress: string;
   createdAt: number;
   coinTossResult?: string;
   paymentSuccess?: boolean;
   transactionLink?: string;
+  betTopic?: string;
+  betOptions?: string[];
 }
 
 export enum GameStatus {

@@ -80,67 +80,62 @@ export async function initializeXmtpClient() {
 export type MessageHandler = (message: any, conversation: any, userId: string, content: string) => Promise<void>;
 
 /**
- * Check if the message is tagged for the toss bot
+ * Extract command from message content
  * @param content Message content
- * @returns True if the message is tagged for toss bot
+ * @returns Command extracted from the message content or null if no command is found
  */
-function isMessageForTossBot(content: string): boolean {
-  const lowerContent = content.toLowerCase().trim();
-  return lowerContent.startsWith('@toss');
-}
-
-/**
- * Strip tag from message content
- * @param content Message content
- * @returns Message content without tag
- */
-function stripTag(content: string): string {
-  // Remove @toss from the beginning and trim
-  return content.replace(/^@toss\s*/i, '').trim();
+export function extractCommand(content: string): string | null {
+  // Check for @toss mentions 
+  const botMentionRegex = /@toss\s+(.*)/i;
+  const botMentionMatch = content.match(botMentionRegex);
+  
+  if (botMentionMatch) {
+    // We found an @toss mention, extract everything after it
+    return botMentionMatch[1].trim();
+  }
+  
+  return null;
 }
 
 /**
  * Start listening for messages and handle them with the provided handler
  */
-export async function startMessageListener(client: Client, handleMessage: MessageHandler) {
-  console.log("Waiting for messages...");
-  const stream = client.conversations.streamAllMessages();
-
-  for await (const message of await stream) {
-    // Ignore messages from the same agent or non-text messages
-    if (
-      message?.senderInboxId.toLowerCase() === client.inboxId.toLowerCase() ||
-      message?.contentType?.typeId !== "text"
-    ) {
-      continue;
+export async function startMessageListener(client: any, 
+  messageHandler: (message: any, conversation: any, userId: string, content: string) => Promise<void>
+): Promise<void> {
+  console.log("🎮 CoinToss Agent is listening for messages...");
+  console.log("👂 Mention @toss in a group chat or use direct messages");
+  console.log("🔍 Example: '@toss create 0.01' or '@toss Will Bitcoin reach $100k this year for 5 USDC?'");
+  
+  // Stream all messages
+  for await (const message of await client.conversations.streamAllMessages()) {
+    try {
+      // Skip if message is undefined
+      if (!message) continue;
+      
+      // Get conversation
+      const conversationId = message.conversationId;
+      const conversation = await client.conversations.getConversationById(conversationId);
+      if (!conversation) continue;
+      
+      // Get message content
+      const content = message.content;
+      if (!content) continue;
+      
+      // Extract sender (userId)
+      const sender = message.senderAddress || message.senderInboxId;
+      if (sender === client.address || sender === client.inboxId) continue; // Skip our own messages
+      
+      // Extract command from the message content
+      const command = extractCommand(content);
+      if (!command) continue; // No command found, skip
+      
+      console.log(`📩 Received command from ${sender}: ${command}`);
+      
+      // Process the command
+      await messageHandler(message, conversation, sender, command);
+    } catch (error) {
+      console.error("Error in message listener:", error);
     }
-
-    const content = message.content as string;
-    
-    // Only process messages that tag @toss
-    if (!isMessageForTossBot(content)) {
-      console.log(`Ignoring message not tagged for toss bot: ${content}`);
-      continue;
-    }
-
-    const strippedContent = stripTag(content);
-    console.log(`Received message for toss bot: ${strippedContent} from ${message.senderInboxId}`);
-
-    // Get the conversation
-    const conversation = await client.conversations.getConversationById(
-      message.conversationId
-    );
-
-    if (!conversation) {
-      console.log("Unable to find conversation, skipping");
-      continue;
-    }
-
-    // Check if this is a group chat
-    const isGroup = 'members' in conversation;
-    console.log(`Conversation is${isGroup ? '' : ' not'} a group chat`);
-
-    // Handle the message
-    await handleMessage(message, conversation, message.senderInboxId, strippedContent);
   }
 } 

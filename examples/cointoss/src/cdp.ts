@@ -13,6 +13,13 @@ import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import { ChatOpenAI } from "@langchain/openai";
 import { StorageProvider } from "./types.js";
 
+// Interface for parsed bet information
+export interface ParsedBet {
+  topic: string;
+  options: string[];
+  amount: string;
+}
+
 export async function getOrCreateWalletForUser(
   userId: string,
   storage: StorageProvider
@@ -101,6 +108,21 @@ export async function initializeAgent(userId: string, storage: StorageProvider) 
       checkpointSaver: memory,
       messageModifier: `
         You are a CoinToss Agent that helps users participate in coin toss betting games.
+        
+        You have two main functions:
+        1. Process natural language bet requests and structure them
+        2. Handle coin toss game management commands
+        
+        When parsing natural language bets:
+        - Extract the bet topic (what people are betting on)
+        - Identify options (default to "yes" and "no" if not provided)
+        - Determine bet amount (default to 0.1 USDC if not specified)
+        - Enforce a maximum bet amount of 10 USDC
+        
+        For example:
+        - "Will it rain tomorrow for 5" should be interpreted as a bet on "Will it rain tomorrow" with options ["yes", "no"] and amount "5"
+        - "Lakers vs Celtics for 10" should be interpreted as a bet on "Lakers vs Celtics game" with options ["Lakers", "Celtics"] and amount "10"
+        
         When checking payments or balances:
         1. Use the USDC token at 0x5dEaC602762362FE5f135FA5904351916053cF70 on Base.
         2. When asked to check if a payment was sent, verify:
@@ -138,6 +160,13 @@ export async function initializeAgent(userId: string, storage: StorageProvider) 
   }
 }
 
+/**
+ * Process a message with the agent
+ * @param agent - The agent executor
+ * @param config - Agent configuration
+ * @param message - The user message
+ * @returns The agent's response
+ */
 export async function processMessage(
   agent: ReturnType<typeof createReactAgent>,
   config: { configurable: { thread_id: string } },
@@ -162,5 +191,80 @@ export async function processMessage(
   } catch (error) {
     console.error("Error processing message:", error);
     return "Sorry, I encountered an error while processing your request. Please try again.";
+  }
+}
+
+/**
+ * Parse a natural language bet prompt to extract structured information
+ * @param agent - The agent
+ * @param config - Agent configuration
+ * @param prompt - The natural language prompt
+ * @returns Parsed bet information
+ */
+export async function parseNaturalLanguageBet(
+  agent: ReturnType<typeof createReactAgent>,
+  config: { configurable: { thread_id: string } },
+  prompt: string
+): Promise<ParsedBet> {
+  try {
+    // Default values in case parsing fails
+    const defaultResult: ParsedBet = {
+      topic: prompt,
+      options: ["yes", "no"],
+      amount: "0.1"
+    };
+
+    if (!prompt || prompt.length < 3) {
+      return defaultResult;
+    }
+
+    console.log(`🔄 Parsing natural language bet: "${prompt}"`);
+    
+    // Format specific request for parsing
+    const parsingRequest = `
+      Parse this bet request into structured format: "${prompt}"
+      
+      Return only a valid JSON object with these fields:
+      {
+        "topic": "the betting topic",
+        "options": ["option1", "option2"],
+        "amount": "bet amount"
+      }
+    `;
+    
+    // Process with the agent
+    const response = await processMessage(agent, config, parsingRequest);
+    
+    // Try to extract JSON from the response
+    try {
+      // Find JSON in the response
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsedJson = JSON.parse(jsonMatch[0]);
+        
+        // Validate and provide defaults if needed
+        const result: ParsedBet = {
+          topic: parsedJson.topic || prompt,
+          options: Array.isArray(parsedJson.options) && parsedJson.options.length >= 2 
+            ? [parsedJson.options[0], parsedJson.options[1]] 
+            : ["yes", "no"],
+          amount: parsedJson.amount || "0.1"
+        };
+        
+        console.log(`✅ Parsed bet: "${result.topic}" with options [${result.options.join(', ')}] for ${result.amount} USDC`);
+        return result;
+      }
+    } catch (error) {
+      console.error("Error parsing JSON from agent response:", error);
+    }
+
+    return defaultResult;
+  } catch (error) {
+    console.error("Error parsing natural language bet:", error);
+    return {
+      topic: prompt,
+      options: ["yes", "no"],
+      amount: "0.1"
+    };
   }
 } 
